@@ -106,6 +106,59 @@ const POSTERS: Record<string, PosterCfg> = {
   P3: { key: 'P3', zh: '银河带优先', spike: 0.75, spikeSize: 5.5, filament: 0.5, hueShift: 0.25, band: 0.55, dustMul: 1.3 },
 };
 
+/**
+ * 星点"屏幕尺寸下限 + 确定性抽稀"：
+ * - 远看时星点会缩到 1px 级，一堆 1px 点糊在一起就是"密集恐惧"的来源，所以设屏幕尺寸下限；
+ * - 抽稀只在真的过密时触发（目标可见点数），且**按星点 id 的哈希确定性取舍**，同一视角可复现，
+ *   不会每帧闪；被抽掉的星**仍然参与辉光层**（几何共享，只是核心不画）。
+ * - `?thin=0` 可关闭，用于同机位前后对比。
+ */
+export interface ThinCfg {
+  enabled: boolean;
+  /** L0 目标"独立星点"数量上限 */
+  target: number;
+  /** 家族星（内容）与兜底星云（背景）各自的保留比例上限 */
+  keepFamily: number;
+  keepCloud: number;
+}
+
+const thinArg = new URLSearchParams(location.search).get('thin');
+export const THIN: ThinCfg = {
+  enabled: thinArg !== '0',
+  target: 9000,
+  keepFamily: 0.55,
+  keepCloud: 0.28,
+};
+
+/**
+ * L0 全景的四种展示策略：?l0=A|B|C|D（默认 A = 现状）
+ * 只影响 L0；L1/L2/词层一律不受影响。共同点：
+ *  - 所有词仍在库里、仍在坐标上，只是"是否作为独立星点渲染"不同（未渲染的仍参与辉光层）；
+ *  - 取舍一律用 id 哈希 / 位置条纹 / 距离淡出，**同一视角可复现**，不随帧变化。
+ */
+export type L0Mode = 'A' | 'B' | 'C' | 'D';
+
+export interface L0Cfg {
+  mode: L0Mode;
+  /** 保留星点的尺寸倍率（B 的核心要更大） */
+  sizeMul: number;
+  /** A 用：目标独立星点数与家族/星云上限 */
+  target: number;
+  keepFamily: number;
+  keepCloud: number;
+  /** C 用：条纹密度（越大条越密） */
+  streak: number;
+}
+
+const l0arg = (new URLSearchParams(location.search).get('l0') || 'A').toUpperCase();
+const L0_MODES: Record<L0Mode, L0Cfg> = {
+  A: { mode: 'A', sizeMul: 1.0, target: 9000, keepFamily: 0.55, keepCloud: 0.28, streak: 0 },
+  B: { mode: 'B', sizeMul: 1.9, target: 0, keepFamily: 0, keepCloud: 0, streak: 0 },
+  C: { mode: 'C', sizeMul: 1.25, target: 0, keepFamily: 0, keepCloud: 0, streak: 26 },
+  D: { mode: 'D', sizeMul: 1.35, target: 0, keepFamily: 0, keepCloud: 0, streak: 0 },
+};
+export const L0: L0Cfg = L0_MODES[(l0arg as L0Mode) in L0_MODES ? (l0arg as L0Mode) : 'A'];
+
 const PK = (new URLSearchParams(location.search).get('poster') || '').toUpperCase();
 export const POSTER: PosterCfg | null = POSTERS[PK] || null;
 

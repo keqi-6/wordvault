@@ -14,7 +14,7 @@ import {
 import type { HighlightSpec } from './starfield';
 import type { SceneSky, StarBuffers } from './starfield';
 import { runtimeRefs, useWV } from '../store';
-import { BRIGHTNESS, POSTER, STYLE } from './style';
+import { BRIGHTNESS, L0, POSTER, STYLE, THIN } from './style';
 import type { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import type { Rel, RelLayer, Star } from '../types';
 
@@ -68,9 +68,10 @@ const LEVEL_TUNE = [
   // 这样 26,608 颗星叠在一起时星团仍靠"密度"显出结构，而不是糊成一片灰。
   // 辉光变淡之后，"星团有存在感"必须靠星点本身：点径与不透明度都提上去，
   // 但星核用的是普通 alpha 混合（不是加法），密集处只会趋近星色、不会累加成白块。
-  { px: 1.45, minPx: 0.7, maxPx: 2.6, bright: 1.0, vis: 0.85, gain: 1.0, tone: 0.72 },
-  { px: 1.6, minPx: 0.9, maxPx: 5.8, bright: 1.08, vis: 1, gain: 1, tone: 1 },
-  { px: 1.8, minPx: 1.0, maxPx: 6.6, bright: 1, vis: 1, gain: 1, tone: 1 },
+  // 屏幕尺寸下限：一颗星再远、再不重要，直径也不低于 3px —— 1px 星点糊成一片正是"密集恐惧"来源
+  { px: 1.45, minPx: 3.0, maxPx: 6.0, bright: 1.0, vis: 0.85, gain: 1.0, tone: 0.72 },
+  { px: 1.6, minPx: 2.6, maxPx: 6.4, bright: 1.08, vis: 1, gain: 1, tone: 1 },
+  { px: 1.8, minPx: 2.6, maxPx: 7.2, bright: 1, vis: 1, gain: 1, tone: 1 },
 ];
 
 const STAR_VS = `
@@ -81,6 +82,7 @@ const STAR_VS = `
   attribute float aVis;
   attribute float aLit;
   attribute float aSpike;
+  attribute float aKeep;
   uniform float uSpike;
   uniform float uSpikePx;
   uniform float uDPR;
@@ -93,6 +95,7 @@ const STAR_VS = `
   varying float vVis;
   varying float vLit;
   varying float vSpike;
+  varying float vKeep;
   void main() {
     vColor = aColor;
     vTone = aTone;
@@ -106,7 +109,13 @@ const STAR_VS = `
     // 之前倍率乘完又被 uMaxPx(2.6px) 夹掉，所以星芒根本长不出来。
     float px = clamp(aSize * uPx * att, uMinPx, uMaxPx);
     px = mix(px, uSpikePx, vSpike);
-    gl_PointSize = px * uDPR;
+    // aKeep 是"独立星点的可见度"（0..1）：B/C 是 0/1 取舍，D 用距离连续淡出 → 不会硬切
+    vKeep = aKeep;
+    gl_PointSize = px * uDPR * aKeep;
+    if (aKeep <= 0.02) {
+      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+    }
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -119,6 +128,7 @@ const STAR_FS = `
   varying float vVis;
   varying float vLit;
   varying float vSpike;
+  varying float vKeep;
   void main() {
     vec2 pc = gl_PointCoord - vec2(0.5);
     float d2 = dot(pc, pc);
@@ -142,6 +152,7 @@ const STAR_FS = `
       float spikes = max(max(armH, armV) * 0.98, max(diag, diag2) * 0.6);
       a = max(a, spikes * vSpike);
     }
+    a *= mix(0.35, 1.0, vKeep); // 淡出时同时变淡，避免"缩到 3px 下限还亮着"的硬边
     if (a <= 0.004) discard;
     gl_FragColor = vec4(min(vColor * uBright, vec3(1.0)), a * vTone * vVis);
   }
@@ -236,6 +247,15 @@ interface Ctx {
   alignBlock: string;
   /** 诊断：beginMotion 被调用的次数（补间被反复重启的话这个数会一直涨） */
   motionStarts: number;
+  /** 抽稀诊断：本帧保留的独立星点数 / 总数 */
+  keepCount: number;
+  keepTotal: number;
+  /** L0-B：重要词 id 集合（已点亮 + 各团词频前 N） */
+  importantIds: Set<number>;
+  /** L0-C：每个子类的条纹方向 */
+  streakDir: Record<string, THREE.Vector3>;
+  /** L0-D：取景中心（与 panoFrame 同一口径） */
+  panoC: THREE.Vector3;
   /** 本次聚焦是否已经启动过（键 = 选中词 + 联系词数）——防止 effect 重跑把补间反复重启 */
   focusStartedFor: string;
   /** 落在画面内的联系词端点数（硬指标：必须等于连线数） */
@@ -441,7 +461,8 @@ export default function SkyView() {
       labelGroup, labels: [], haloMesh: null, haloKey: '', starP98: 1, layoutLoaded: '',
     heroFramedFor: null, heroAlignAt: 0, heroAlignOffAt: 0, camSig: '', camStableSince: 0,
     heroAlignCount: 0, settleCount: 0, wasSettled: false, alignSinceSelect: 0, alignBlock: 'init', motionStarts: 0,
-    focusStartedFor: '',
+    focusStartedFor: '', keepCount: 0, keepTotal: 0,
+    importantIds: new Set<number>(), streakDir: {}, panoC: new THREE.Vector3(),
     focusOnScreen: 0, clusterScreenX: -1, clusterOffPct: 0, panelW: 0, viewCenterX: w / 2,
     selScreenX: -1, selOffPct: 0, hlPoints,
       focusGroup,
@@ -669,7 +690,8 @@ export default function SkyView() {
             (c.selScreenX >= 0 ? ' · 选中词 x' + Math.round(c.selScreenX) + '（偏 ' + c.selOffPct.toFixed(1) + '%）' : '') +
             ' · 已移动 ' + c.motionTargets.size +
             ' · 取景 r' + c.frameRadius.toFixed(2) +
-                    ' · 补间 ' + c.motionStarts + (c.motionActive ? '(进行中)' : '(已停)') +
+                    ' · L0-' + L0.mode + ' · 保留 ' + c.keepCount + '/' + c.keepTotal +
+            ' · 补间 ' + c.motionStarts + (c.motionActive ? '(进行中)' : '(已停)') +
             ' · 对齐 ' + c.alignSinceSelect + '/' + c.heroAlignCount + '（停稳 ' + c.settleCount +
             ' · 挡:' + c.alignBlock + ' · 距 ' + Math.round(performance.now() - c.heroAlignAt) + 'ms · 动过' +
             (Math.max(c.cam.lastUserInput(), c.heroAlignOffAt) > c.selectedAt ? 1 : 0) + '）' +
@@ -755,6 +777,48 @@ export default function SkyView() {
     ctx.stars = stars;
     ctx.sky = normalizeSky(stars);
     const stNow = useWV.getState();
+    // ---- 词根星相：家族改成"词根在中心 + 衍生词放射" ----
+    // 数据里没有"词根的中文含义"（只有 root 文本），所以中心只标词根文本（簇标签显示）。
+    // 原始家族半径只有 ~4（场景半径 ~202），挤成一坨 → 看不出"一个词根衍生了哪些词"。
+    // 只动 kind==='family' 的家族；__other__ / __none__ 保持原样；其余四个星相完全不动。
+    if (stNow.layoutKey === 'root') {
+      const fams = stNow.clusters.filter((c) => (c.kind || 'family') === 'family');
+      const posArr = ctx.sky.positions as Float32Array;
+      const idxOf = new Map<number, number>();
+      stars.forEach((s, i) => idxOf.set(s.id, i));
+      const GOLD = Math.PI * (3 - Math.sqrt(5)); // 黄金角：确定性、均匀、不随帧变化
+      const rad = ctx.sky.radius;
+      const cx0 = ctx.sky.center.x;
+      const cy0 = ctx.sky.center.y;
+      const cz0 = ctx.sky.center.z;
+      for (const g of fams) {
+        const members = stars.filter((s) => s.group === g.key);
+        if (members.length < 3) continue;
+        const ccx = (g.center[0] - cx0) / rad;
+        const ccy = (g.center[1] - cy0) / rad;
+        const ccz = (g.center[2] - cz0) / rad;
+        // 半径随词数增长：既看得出"这是个大团"，又让每个词有独立位置
+        const R = 0.012 + 0.0085 * Math.sqrt(members.length);
+        // 词频高的更靠近词根（中心）：衍生主次一眼可见
+        const ordered = members.slice().sort((a, b) => (b.frq || 0) - (a.frq || 0));
+        const n = ordered.length;
+        for (let i = 0; i < n; i++) {
+          const yy0 = 1 - (2 * (i + 0.5)) / n;
+          const rr = Math.sqrt(Math.max(0, 1 - yy0 * yy0));
+          const th = GOLD * i;
+          const x = ccx + Math.cos(th) * rr * R;
+          const y = ccy + yy0 * R;
+          const z = ccz + Math.sin(th) * rr * R;
+          const ix = idxOf.get(ordered[i].id);
+          if (ix === undefined) continue;
+          posArr[ix * 3] = x;
+          posArr[ix * 3 + 1] = y;
+          posArr[ix * 3 + 2] = z;
+          const v = ctx.sky.posById.get(ordered[i].id);
+          if (v) v.set(x, y, z);
+        }
+      }
+    }
     // 按空间相邻贪心着色：挨得近的星团色相差 ≥40°，隔得远的可复用相近色
     ctx.colorTable = spatialMajorColors(stNow.clusters.length ? stNow.clusters : stNow.majors);
 
@@ -1030,6 +1094,37 @@ export default function SkyView() {
     const ctx = ctxRef.current;
     if (!ctx || !ctx.starBuf) return;
     const st = useWV.getState();
+    // ---- L0 展示策略所需辅助数据（每次刷新重建，确定性）----
+    if (st.level === 0 && L0.mode === 'B') {
+      const imp = ctx.importantIds;
+      imp.clear();
+      const per = new Map<string, Star[]>();
+      for (const s of st.stars) {
+        if (s.lit) imp.add(s.id); // 已点亮的词
+        const g = s.group || s.major || '';
+        const arr = per.get(g);
+        if (arr) arr.push(s);
+        else per.set(g, [s]);
+      }
+      for (const arr of per.values()) {
+        arr.sort((a, b) => (b.frq || 0) - (a.frq || 0));
+        for (let i = 0; i < Math.min(14, arr.length); i++) imp.add(arr[i].id); // 每团词频前 14
+      }
+    }
+    if (st.level === 0 && L0.mode === 'D') {
+      // 与 panoFrame 同一口径：所有团心的质心
+      const c0 = ctx.panoC;
+      c0.set(0, 0, 0);
+      let n2 = 0;
+      for (const cl of st.clusters) {
+        const p = ctx.majorCenter[cl.key];
+        if (p) {
+          c0.add(p);
+          n2 += 1;
+        }
+      }
+      if (n2) c0.multiplyScalar(1 / n2);
+    }
     const sb = ctx.starBuf;
     let visible = 0;
     let litVisible = 0;
@@ -1083,7 +1178,8 @@ export default function SkyView() {
         visible += 1;
         return;
       }
-      sb.size[i] = starPointSize(s) * (cloud ? 0.82 : 1);
+      // L0 各方案的核心尺寸倍率（B 的核心明显更大，才有辨识度）
+      sb.size[i] = starPointSize(s) * (cloud ? 0.82 : 1) * (st.level === 0 ? L0.sizeMul : 1);
       // 本帧这颗星是否属于"当前正在看的那一支"
       const inScopeNow =
         (st.level >= 1 && st.level < wordsLevel && s.major === st.majorKey) ||
@@ -1100,12 +1196,48 @@ export default function SkyView() {
         if (!inScope) vis *= CLOUD_DIM;
       }
       sb.vis[i] = vis;
+      // ---- L0 的四种展示策略（?l0=A|B|C|D）：只影响"这颗星是否作为独立星点渲染" ----
+      // 所有词仍在库里、仍在坐标上；keep=0 的星仍然参与辉光层（几何共享）。
+      // 取舍一律确定性（id 哈希 / 位置条纹 / 距离淡出），同一视角必然一致。
+      let keep = 1;
+      if (THIN.enabled && st.level === 0) {
+        let h = (s.id * 2654435761) % 4294967296;
+        h = (h ^ (h >>> 13)) >>> 0;
+        const hf = h / 4294967296;
+        if (L0.mode === 'A') {
+          // A：现状 —— 全局按哈希抽稀到目标数量，兜底星云抽得更狠
+          const ratio = Math.min(L0.keepFamily, L0.target / Math.max(1, st.stars.length));
+          const cap = cloud ? Math.min(ratio, L0.keepCloud) : ratio;
+          keep = hf < cap ? 1 : 0;
+        } else if (L0.mode === 'B') {
+          // B：核心 + 光晕 —— 只有"重要词"是独立星点：已点亮的 + 各团词频最高的前 N 个
+          keep = ctx.importantIds.has(s.id) ? 1 : 0;
+        } else if (L0.mode === 'C') {
+          // C：星云丝缕 —— 每个子类给一个方向，沿该方向做条纹取舍 → 团内出现"缕"
+          const key = s.minor || s.major || '';
+          const sd = ctx.streakDir;
+          const dir = sd[key] || (sd[key] = dirFor(key));
+          const p = ctx.sky.posById.get(s.id);
+          const d = p ? p.x * dir.x + p.y * dir.y + p.z * dir.z : 0;
+          const f = d * L0.streak - Math.floor(d * L0.streak);
+          keep = f < 0.42 ? 1 : 0;
+        } else {
+          // D：景深 —— 离取景中心越远越淡（连续淡出，不硬切）；外围整体降为光晕
+          const p = ctx.sky.posById.get(s.id);
+          const r = p ? Math.hypot(p.x - ctx.panoC.x, p.y - ctx.panoC.y, p.z - ctx.panoC.z) : 1;
+          const t = (r - 0.3) / (0.78 - 0.3); // 0.3 内全保留，0.78 外只剩光晕
+          keep = Math.max(0, Math.min(1, 1 - t));
+        }
+      }
+      if (sb.keepArr) sb.keepArr[i] = keep;
       if (vis >= 0.02) visible += 1;
       if (vis >= 0.5) {
         litVisible += 1;
         if (inScopeNow) scopeLit += 1;
       }
     });
+    ctx.keepTotal = sb.keepArr.length;
+    ctx.keepCount = sb.keepArr.reduce((a, b) => a + (b > 0.5 ? 1 : 0), 0);
     ctx.visibleCount = visible;
     ctx.litVisible = litVisible;
     ctx.scopeLit = scopeLit;
@@ -1122,7 +1254,7 @@ export default function SkyView() {
     (sb.geometry.getAttribute('aVis') as THREE.BufferAttribute).needsUpdate = true;
     void toneDirty;
     // 一律标记上传：条件上传曾经是"部分更新"这类 bug 的温床，属性数组只有 26k 个 float，代价可忽略
-    for (const name of ['aSize', 'aTone', 'aVis', 'aColor', 'aLit', 'aBoost']) {
+    for (const name of ['aSize', 'aTone', 'aVis', 'aColor', 'aLit', 'aBoost', 'aKeep']) {
       const at = sb.geometry.getAttribute(name) as THREE.BufferAttribute | undefined;
       if (at) at.needsUpdate = true;
     }
@@ -1679,6 +1811,18 @@ export default function SkyView() {
     const lemma = best ? best.lemma : null;
     ctx.hoverLemma = lemma;
     useWV.getState().setHover(lemma);
+  }
+
+  /** L0-C：由子类 key 派生一个稳定方向（同一子类永远同一方向 → 同一视角可复现） */
+  function dirFor(key: string): THREE.Vector3 {
+    let h = 2166136261;
+    for (let i = 0; i < key.length; i++) {
+      h ^= key.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    const a = (h % 1000) / 1000 * Math.PI * 2;
+    const b = ((h >>> 10) % 1000) / 1000 * Math.PI - Math.PI / 2;
+    return new THREE.Vector3(Math.cos(a) * Math.cos(b), Math.sin(b), Math.sin(a) * Math.cos(b)).normalize();
   }
 
   /** 当前层级下"合适"的相机距离 */

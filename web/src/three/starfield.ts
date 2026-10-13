@@ -259,6 +259,8 @@ export interface StarBuffers {
   boost: Float32Array;
   /** 1 = 带星芒的"最亮星"（每团 top 0.5%） */
   spike: Float32Array;
+  /** 1 = 画独立星点，0 = 被抽稀（只留辉光） */
+  keepArr: Float32Array;
 }
 
 export function makeStarBuffers(sky: SceneSky, stars: Star[], mode: DisplayMode = 'bright'): StarBuffers {
@@ -337,8 +339,13 @@ export function makeStarBuffers(sky: SceneSky, stars: Star[], mode: DisplayMode 
   geometry.setAttribute('aCore', new THREE.BufferAttribute(coreArr, 1));
   geometry.setAttribute('aBoost', new THREE.BufferAttribute(boostArr, 1));
   geometry.setAttribute('aSpike', new THREE.BufferAttribute(spikeArr, 1));
+  const keepArrAttr = new THREE.BufferAttribute(new Float32Array(n).fill(1), 1);
+  geometry.setAttribute('aKeep', keepArrAttr);
   geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 2);
-  return { geometry, color, size, tone, vis, lit, cloud: cloudArr, core: coreArr, boost: boostArr, spike: spikeArr };
+  return {
+    geometry, color, size, tone, vis, lit, cloud: cloudArr, core: coreArr,
+    boost: boostArr, spike: spikeArr, keepArr: keepArrAttr.array as Float32Array,
+  };
 }
 
 // ---------------------------------------------------------------- 标签（3 倍超采样，显示时缩放）

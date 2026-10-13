@@ -73,6 +73,8 @@ CREATE TABLE error_stats(word_id INTEGER NOT NULL, error_type TEXT NOT NULL,
 CREATE TABLE quiz_items(id INTEGER PRIMARY KEY, word_id INTEGER NOT NULL, item_type TEXT NOT NULL,
   prompt TEXT, options TEXT DEFAULT '[]', answer TEXT DEFAULT '', source TEXT DEFAULT '',
   source_ref TEXT DEFAULT '', generated INTEGER DEFAULT 0);
+CREATE TABLE morphemes(morpheme TEXT NOT NULL, kind TEXT NOT NULL, meaning TEXT NOT NULL,
+                        PRIMARY KEY(morpheme, kind));
 CREATE TABLE zh_gloss(word_id INTEGER NOT NULL, zh TEXT NOT NULL, src TEXT DEFAULT 'omw');
 CREATE TABLE layouts(layout TEXT NOT NULL, word_id INTEGER NOT NULL, cluster TEXT, cluster_zh TEXT,
   x REAL, y REAL, z REAL);
@@ -139,6 +141,22 @@ def clean_root(root: str, lemma: str) -> str:
         return ""
     parts = [p for p in root.split(",") if p and p.lower() != lemma.lower()]
     return ",".join(parts)
+
+
+def load_morphemes() -> dict[tuple[str, str], str]:
+    """读 data/build/affix_meanings.json → {(词素, 类别): 中文含义}。
+
+    这张表是**知识性填写**的，不是 LLM 生成；只收"确定的"含义。
+    拿不准的被单独列在 uncertain / not_a_morpheme 里，**不进这张表** ——
+    界面上宁可没有含义，也不要给一个编的。
+    """
+    d = read_json(BUILD / "affix_meanings.json", {})
+    out: dict[tuple[str, str], str] = {}
+    for kind in ("prefix", "suffix", "root"):
+        for m, mean in (d.get(kind) or {}).items():
+            if mean:
+                out[(str(m).lower(), kind)] = str(mean)
+    return out
 
 
 def clean_example(en: str) -> str:
@@ -513,7 +531,18 @@ def main() -> None:
         key = L["key"]
         pos = lay["positions"].get(key, {})
         mem = lay["membership"].get(key, {})
-        zh_of = {c["key"]: c["zh"] for c in L.get("clusters", [])}
+        # **词根星相**：家族簇的标签补上中文含义（spect → "spect 看"）。
+        # 这是这轮含义表的直接用途——让"词根"从看不懂的字符串变成能用的线索。
+        # 没有含义的保持原样（宁可少给，不给编的）。
+        morph_mean = load_morphemes()
+        zh_of = {}
+        for c in L.get("clusters", []):
+            label = c["zh"]
+            if key == "root" and c.get("kind", "family") == "family":
+                mv = morph_mean.get((str(c["key"]).lower(), "root"))
+                if mv:
+                    label = f"{label} {mv}"
+            zh_of[c["key"]] = label
         for lemma, p in pos.items():
             wid_ = wid.get(lemma)
             if wid_ is None:
@@ -521,13 +550,21 @@ def main() -> None:
             cl = mem.get(lemma, "")
             lrows.append((key, wid_, cl, zh_of.get(cl, cl), float(p[0]), float(p[1]), float(p[2])))
         for c in L.get("clusters", []):
-            mrows.append((key, c["key"], c["zh"], int(c["count"]), float(c["center"][0]),
+            mrows.append((key, c["key"], zh_of.get(c["key"], c["zh"]), int(c["count"]), float(c["center"][0]),
                           float(c["center"][1]), float(c["center"][2]), c.get("kind", "family")))
         crows.append((key, L["zh"], L["desc"], int(L["depth"]), L["edges_layer"], len(L.get("clusters", [])), len(pos)))
     conn.executemany("INSERT INTO layouts(layout,word_id,cluster,cluster_zh,x,y,z) VALUES(?,?,?,?,?,?,?)", lrows)
     conn.executemany("INSERT INTO layout_clusters(layout,cluster,zh,cnt,cx,cy,cz,kind) VALUES(?,?,?,?,?,?,?,?)", mrows)
     conn.executemany("INSERT INTO layout_meta(layout,zh,descr,depth,edges_layer,cluster_count,word_count) VALUES(?,?,?,?,?,?,?)", crows)
     log(f"  layouts: {len(crows)} 套 / {len(lrows)} 条星位 / {len(mrows)} 个星团")
+
+    # ---- 词素含义表（前缀/后缀/词根）----
+    _mm = load_morphemes()
+    conn.executemany(
+        "INSERT OR IGNORE INTO morphemes(morpheme,kind,meaning) VALUES(?,?,?)",
+        [(m, k, v) for (m, k), v in _mm.items()],
+    )
+    log(f"  morphemes: {len(_mm)} 条含义")
 
     # ---- OMW 中文词面（用于中文反查与词条面板）----
     zrows = []
