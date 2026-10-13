@@ -1,0 +1,16 @@
+{
+  "name": "wordvault-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "词穹 WordVault 本地后端（Express + Node 内置 sqlite）",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

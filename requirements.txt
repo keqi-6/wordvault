@@ -1,0 +1,14 @@
+# 词穹 WordVault —— 数据管线依赖
+#
+# 只有管线需要这些；后端（Node）和前端（Vite/React）走 npm，见 setup.ps1。
+# 安装： pip install -r requirements.txt
+#
+# 实测环境： CPython 3.12.10
+
+numpy>=1.26          # 词向量处理、坐标计算
+pandas>=2.0          # parse_relations.py 里处理 MorphoLex 的表格
+
+# 可选：繁简转换。
+# Tatoeba 的中文语料繁简混杂，装上它会把例句统一成简体；
+# 不装也能跑完整条管线，只是例句可能夹杂繁体。
+opencc-python-reimplemented>=0.1.7

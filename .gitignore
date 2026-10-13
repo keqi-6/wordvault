@@ -1,0 +1,24 @@
+data/raw/
+data/build/
+data/nltk_data/
+data/tools/
+
+# 调试用的录屏与抽帧产物：录屏是用户桌面的屏幕录像，**含隐私内容，不要提交**；
+# 抽帧图可以由录屏重新生成，也没有必要进版本库。
+docs/tour/video/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.log
+.venv/
+node_modules/
+web/dist/
+__pycache__/
+*.pyc
+.env
+.env.local
+
+# 开发过程中的巡览与验证截图（几百张，属过程证据，不进版本库）
+docs/tour/
+web/docs/verify/
+docs/verify/
