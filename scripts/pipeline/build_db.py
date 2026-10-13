@@ -263,7 +263,19 @@ def tatoeba_examples(targets: set[str], per_word: int = 2) -> dict[str, list[dic
     return out
 
 
-def build_quiz_items(wid: int, entry: dict, pool: list[dict], rng: random.Random) -> list[dict]:
+# 干扰项的来源优先级：**有关系的词才是真正会混的**。
+# 同源词（emit/emission）考的是构词辨析，近义/反义考的是义项辨析，
+# 同情景词只是"话题接近"，最容易一眼排除，所以排最后。
+LAYER_RANK = {"morphology": 3, "semantic": 2, "scenario": 1}
+
+
+def build_quiz_items(
+    wid: int,
+    entry: dict,
+    pool: list[dict],
+    rng: random.Random,
+    related: list[tuple[dict, str]] | None = None,
+) -> list[dict]:
     items: list[dict] = []
     senses = entry.get("senses") or []
     if not senses:
@@ -274,19 +286,33 @@ def build_quiz_items(wid: int, entry: dict, pool: list[dict], rng: random.Random
         return items
     pos = senses[0].get("pos") or entry.get("pos") or ""
 
-    # 干扰项要挑得像：同词性优先、释义长度接近，其次才是情景相近。
-    # 纯随机挑会给出「学院的」对「性别」这种一眼就能排除的选项。
     cand: list[dict] = []
-    for p in pool:
+    seen: set[str] = {en}
+
+    def add(p: dict, rel: int) -> None:
         ps = (p.get("senses") or [{}])[0]
         pz = ps.get("translation", "")
-        if not pz or pz == zh or p["lemma"] == en:
-            continue
+        if not pz or pz == zh or p["lemma"] in seen:
+            return
+        seen.add(p["lemma"])
         ppos = ps.get("pos") or p.get("pos") or ""
-        cand.append({"zh": pz, "en": p["lemma"],
-                     "same_pos": 0 if (pos and ppos and ppos != pos) else 1,
-                     "dlen": abs(len(pz) - len(zh))})
-    cand.sort(key=lambda c: (-c["same_pos"], c["dlen"]))
+        cand.append({
+            "zh": pz,
+            "en": p["lemma"],
+            "rel": rel,
+            "same_pos": 0 if (pos and ppos and ppos != pos) else 1,
+            "dlen": abs(len(pz) - len(zh)),
+        })
+
+    # ① 先放"联系词"—— 同源 / 近义 / 反义，才是真正会混的
+    for p, layer in related or []:
+        add(p, LAYER_RANK.get((layer or "").lower(), 1))
+    # ② 再用同情景词补足
+    for p in pool:
+        add(p, 0)
+
+    # 联系词优先 → 同词性 → 释义长度接近
+    cand.sort(key=lambda c: (-c["rel"], -c["same_pos"], c["dlen"]))
 
     def distractors(key: str, n: int = 3) -> list[str]:
         out: list[str] = []
@@ -542,6 +568,19 @@ def main() -> None:
     log(f"  review_states: {len(strows)}")
 
     # ---- quiz items ----
+    # **关系索引**：出题时优先用"联系词"做干扰项。
+    # 目的就在项目名字里——"用单词之间的联系来记单词"，
+    # 那么考一个词时，最该混进来的就是它的联系词。
+    rel_peer: dict[int, dict[int, str]] = defaultdict(dict)
+    for e in rel.get("edges", []):
+        s = wid.get(e.get("src", ""))
+        d = wid.get(e.get("dst", "")) if e.get("dst") else None
+        if not s or not d or s == d:
+            continue
+        rel_peer[s][d] = (e.get("layer") or e.get("kind") or "").lower()
+    entry_by_id = {wid[e["lemma"]]: e for e in entries}
+    log(f"  关系索引: {len(rel_peer)} 个词有联系词")
+
     qrows = []
     by_minor: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for e in entries:
@@ -555,7 +594,9 @@ def main() -> None:
             pool = lit_entries
         seed = int(hashlib.md5(e["lemma"].encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(seed)
-        for it in build_quiz_items(wid[e["lemma"]], e, pool, rng):
+        peers = rel_peer.get(wid[e["lemma"]], {})
+        related = [(entry_by_id[i], lay) for i, lay in peers.items() if i in entry_by_id]
+        for it in build_quiz_items(wid[e["lemma"]], e, pool, rng, related):
             qrows.append((wid[e["lemma"]], it["item_type"], it["prompt"],
                           json.dumps(it["options"], ensure_ascii=False), it["answer"],
                           it["source"], it["source_ref"], 0))
